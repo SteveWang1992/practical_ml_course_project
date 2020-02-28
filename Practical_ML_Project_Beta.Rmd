@@ -1,0 +1,275 @@
+---
+title: "Practical Machine Learning Week4 Project"
+author: "Rui Wang"
+date: "2/27/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Data Preparation
+
+### The package requirement
+
+For easier and faster data manipulation and data visualization purposes, I would load some additional packages in this project. The ultimate goal of this project was training algorithms for more accurate predication in the future, so the `caret` package is essential to the entire project. `caret` could dramatically increase the machine learning terminology consistency and code readability, and also accelarate the whole training-testing procedure.
+
+```{r Package_Loading, message=FALSE}
+# The "TRUE" in result means package has been loaded succeussfully
+pack_vec <- c("readr", "tidyr", "dplyr", "ggplot2")
+sapply(pack_vec, require, character.only = TRUE)
+```
+
+### Loading Data
+
+#### Check NAs
+
+There were one trainging dataset and one testing dataset for this project, I would load the training dataset firstly, and leave the testing dataset for the last moment. `readr` package was used for loading data.
+
+```{r Loading_Data, warning=FALSE, message=FALSE}
+original_data <- read_csv("ml_project_training.csv", trim_ws = TRUE, na = c(" ", "NA", "#DIV/0!"))
+cat("checkout the data specification: \n", dim(original_data))
+glimpse(original_data)
+```
+
+There were `r dim(original_data)[1]` rows, and `r dim(original_data)[2]` columns in the training dataset.
+
+### Cleaning Data
+
+From the above loading result, I could tell that `X1` is useless, and I also had some variables contain missing values, which is not allowed for machine learning algorithms.
+
+```{r Check_Missing_Data, fig.height=4.5, fig.width=9}
+original_data <- original_data[-1]
+col_na_summary <- original_data %>%
+    summarise_all(function(x) sum(is.na(x))) %>%
+    t()
+# Using dataframe make na values summary tidy and visualized by ggplot2
+col_na_summary <- tibble(var_name = rownames(col_na_summary), na_num = col_na_summary[, 1])
+col_na_summary %>% ggplot(aes(x = var_name, y = na_num)) + 
+    geom_col(fill = "red") + 
+    labs(x = "Variable Name", y = "Number of NAs") + 
+    ggtitle("NAs Barplot") + 
+    theme(axis.text.x = element_text(angle = 90, size = rel(0.5)))
+# Calculate the total column numbers containg "NA"
+na_cols_num <- sum(col_na_summary["na_num"] != 0)
+```
+
+There were total `r na_cols_num` columns containing `NA`, which took **`r round(na_cols_num/dim(original_data)[2]*100, 0)`%** columns of the dataset. I used histogram to check `NA` percent in those columns that contain missing values. The histogram shows that most `NA` columns contain more than 97% `NA`, which means more than **97%** data were missing in those columns. I choosed to drop all the `NA` columns instead of imputation.
+
+```{r NA_percent_hist, fig.height=3.5, fig.width=9}
+col_na_summary %>% 
+    filter(na_num != 0) %>% 
+    mutate(na_percent = na_num / dim(original_data)[1]) %>% 
+    ggplot(aes(x = na_percent)) +
+    geom_histogram(bins = 40) + 
+    xlab("NA percent bins")
+```
+
+#### Get Clean Dataset
+
+Extracted all the columns that *do not* contain any `NA`s, and built the clean dataset for machine learning. In the original dataset, the column I needed to predict is `classe`, and I renamed it to `class` for convention. 
+
+```{r Get_Clean_Dataset}
+clean_colname <- col_na_summary %>% filter(na_num == 0) %>% pull(var_name)
+clean_data <- original_data %>% select(clean_colname) %>% rename(class = classe)
+cat("Clean Data Specification:\n", dim(clean_data))
+```
+
+## Machine Learning
+
+### How I choose which machine learning algorithms I would use
+
+I think this part should come first at the very beginning of the **Machine Learning** part. Becuase what machine learning algorithms I would choose decide how I preprocess the dataset before the model fitting.
+
+There were two aspects that I would take into consideration most time.
+
+1. Speed
+2. Accuracy (For Classification Problem)
+
+#### Speed
+
+If I will run the machine learning algorithms locally, like on my laptop, speed is arguably the most import aspect depends on how large the training dataset is. Unless you are pretty sure about how the algorithm will perform, you usually will not want to put tree-based model or support vector machines algorithms at first place. Because waiting hours and getting a unexpected result from the training model is definitely a not wise choice. For the reasone of that, I usually consider using linear family model firstly, and check the performance of algorithms. Linear model takes relatively much less time compared to how much time other algorithms take, even when the training dataset is large.
+
+#### Accuracy
+
+The goal of machine learning is building reliable model for more accurate predication. After the fast linear model implementation, if I am not satisfied with acurracy, I will turn into tree-based model, bagging or support vector machines.
+
+### Preprocessing
+
+The pros of linear family models are clearly the speed and the interpretability. But linear models have a lot of limitations like collinearity, variable types, and normalization(or in other word scale). So in the preprocess procedure, I had to check variable types and correlations between variables. 
+
+#### Variable Types
+
+There were total *59* columns in the clean training dataset including the target column `class` contains classification labels.  After checking the column types, I found out *4* of the columns were character columns, and *55* of them were numeric columns. 
+
+```{r}
+cols_type <- sapply(clean_data, class)
+table(cols_type)
+```
+
+#### Collinearity
+
+For eaiser spot potential collinearity issue, I used `corrplot` packge to build correlation matrix. Obviously, there were some variabels have collinearity issue, so `pca` (principle component analysis transformation) is necessary before linear family models.
+
+```{r Coorelation_Visualization, fig.height=9, fig.width=9}
+library(corrplot)
+
+cor_matrix <- clean_data %>% 
+    select_if(is.numeric) %>% 
+    select(-c(1, 2, 3)) %>%
+    cor()
+
+corrplot(cor_matrix, method = "shade", shade.col = NA, tl.cex = 0.5, tl.col = "black")
+```
+
+#### Variable Transformation
+
+1. Transform the character variables into factor variable
+2. Normalize the numeric variables and implement `pca` 
+
+```{r Transformation}
+library(caret)
+
+test_factor <- clean_data[cols_type == "character"][-2] %>% mutate_all(as.factor)
+dummies <- dummyVars(class ~ ., data = test_factor)
+test_factor <- predict(dummies, newdata = test_factor)
+
+test_numeric <- clean_data %>% 
+    select_if(is.numeric) %>% 
+    select(-c(1, 2, 3))
+
+pre_model <- preProcess(test_numeric, method = c("scale", "center", "pca"))
+test_numeric <- predict(pre_model, newdata = test_numeric)
+
+test_combine <- cbind(test_numeric, test_factor)
+test_combine<- cbind(data.frame(test_combine), class = clean_data$class)
+```
+
+### Model Fitting: Linear Discriminant Analysis Model - *LDA*
+
+As previously addressed, I would choose *Linear Discriminant Analysis* model as the firstly tested model. And for model training validation purpose, I would split the clean training dataset into training set and validation set. The real testing dataset would not be used in this stage.
+
+#### Data_Spliting
+
+```{r Data_Spliting}
+# For reproducible purpose, seed will be set
+set.seed(123)
+
+indTrain_test <- createDataPartition(y = test_combine$class, times = 1, p = 0.7, list = FALSE)
+train_set_1 <- test_combine[indTrain_test, ]
+test_set_1 <- test_combine[-indTrain_test, ]
+```
+
+#### Cross Validation
+
+Cross validation was the critical procedure during modeling fitting. For more reliable model training procedure, I would use 5 folds repeated cross validation 3 times in the model training.
+
+```{r Cross_Validation}
+tf_control <- trainControl(method = "repeatedcv", number = 5, repeats = 3)
+```
+
+#### LDA Model Training
+
+Taking our training dataset size into consideration, `doParallel` package was very import for reducing training time and improving efficiency. For better monitoring how much training time I needed, I also loaded `tictoc` package.
+
+```{r Model_Training_LDA, message=FALSE}
+library(doParallel)
+library(tictoc)
+
+tic("LDA")
+n_core <- detectCores()
+cl <- makePSOCKcluster(n_core)
+registerDoParallel(cl)
+
+model_lda <- train(class ~ ., method = "lda", data = train_set_1, 
+                            tf_control = tf_control, 
+                            verbose = FALSE)
+stopCluster(cl)
+toc()
+# Check the model basic info
+model_lda
+# Using confusion matrix check the validation set predication problems
+pred_val_lda <- predict(model_lda, newdata = test_set_1)
+confusionMatrix(pred_val_lda, test_set_1$class)
+```
+
+After fitting the LDA model, I noticed that the accuracy clearly was not good enough. And I used validation set to check the potential problems. There were total 5 unique classifaction labels in the target variable. From the confusion matrix output, I found out most class labels sensitivity were below 60% except class A, and the sensitivity of class B and class E looked even worse. Another important information is that LDA training time was around 18 seconds, which means more complicated models like tree-based model or support vector machine model would take much more time for sure. For ideal accuracy, I turned into *Random Forest*.
+
+### Model Fitting: Random Forest - *rf*
+
+*Random Forest* has much less limitation on dataset and model training procedure, which does not need variable transformation. So I could directly fit the training dataset into the model. But one significant downside worth our noticing is that Random Forest takes much more computation power than LDA, if you do not have parallel computation package like `doParallel` or `doSNOW` loaded, you have to run this model very carefully. 
+
+#### Data_Spliting
+
+```{r Data_Spliting_2}
+# Drop the timestamp columns I do not need
+drop_time_cols <- clean_data %>% select(contains("time")) %>% names()
+test_original <- clean_data %>% select(-drop_time_cols)
+
+# Split the dataset into training set and validation set
+set.seed(123)
+
+indTrain <- createDataPartition(y = test_original$class, times = 1, p = 0.7, list = FALSE)
+train_set_2 <- test_original[indTrain, ]
+test_set_2 <- test_original[-indTrain, ]
+```
+
+#### Cross Validation
+
+For a fair comparision with Linear Discriminant Analysis Model, I used the same cross validation strategy in Random Forest as I used in Linear Discriminant Analysis Model. So I could easily tell which model is better from the training and validation results.
+
+
+
+#### Random Forest Model Training
+
+I used `tictoc` package again to monitor how much time I actually needed for training Random Forest.
+
+```{r Model_Training_Random_Forest}
+tic("random forest with original dataset")
+cl <- makePSOCKcluster(8)
+registerDoParallel(cl)
+model_rf <- train(class ~ ., method = "rf", data = train_set_2, 
+                               tf_control = tf_control, 
+                               verbose = FALSE)
+stopCluster(cl)
+toc()
+model_rf
+```
+
+As expected, I needed much more time for Random Forest training than LDA training. But I believed that Random Forest would have reasonably better performance when LDA's performance fell below our expectation. And I used validation set and confusion matrix to check my conjecture.
+
+```{r ConfusionMatrix_Random_Forest}
+pred_val_rf <- predict(model_rf, newdata = test_set_2)
+# Notice we have to transform our reference vector into factor type for confusion matrix
+confusionMatrix(pred_val_rf, as.factor(test_set_2$class))
+```
+
+Random Forest's overall performance was suprisingly better than the LDA's, and it also tended to be much more reliable than LDA.
+
+### Out Of Sample Error
+
+There were definitely some out of sample error, and I would put several situations on the below list:
+
+1. Some predicators I used for model training are missing or have incomplete observations.
+2. Some systematic errorness occured, and some extreme values mix into the predicators. Although this is not a big problem for complicated tree-based model like Random Forest, we still need pay attention this potential issue.
+
+### Final Test Dataset Predication
+
+Lastly, I directly loaded the final testing dataset csv file, and used our well trained Random Forest model to make final predication. 
+
+```{r Final_test, message=FALSE}
+# Extract the predicators I needed for findal predication, and notice the testing dataset did not
+# include "classe" variable so I have to exclude it from pervious column name vectors
+final_test_dataset <- read_csv("ml__project_testing.csv", trim_ws = TRUE, na = c(" ", "NA", "#DIV/0!"))
+cat("checkout the data specification: ", dim(final_test_dataset))
+# Get the clean column names vector for our testing dataset
+clean_colname_test <- names(test_original)[names(test_original) != "class"]
+# Get the clean testing dataset for random forest and delete the useless "X1" variable
+real_test_val <- final_test_dataset %>% select(clean_colname_test, -X1)
+# Using testing dataset for final predication
+real_pred_val <- predict(model_rf, newdata = real_test_val)
+real_pred_val
+```
+
+
